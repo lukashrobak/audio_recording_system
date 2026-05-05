@@ -1,0 +1,22 @@
+import os
+import time
+
+def setup_hardware():
+    print("--- PCM1807 Audio Setup for RPi5 v2 ---")
+
+    # Pin 38 (GPIO20) = I2S data input (SDI)
+    os.system("pinctrl set 20 a2")
+
+    # Pin 12 (GPIO18) = I2S BCK (Bit Clock)
+    os.system("pinctrl set 18 a2")
+
+    # Pin 35 (GPIO19) = I2S LRCK (Word Clock)
+    os.system("pinctrl set 19 a2")
+
+    time.sleep(1)
+
+    print("\n--- Verification ---")
+    os.system("pinctrl get 18,19,20")
+
+if __name__ == "__main__":
+    setup_hardware()

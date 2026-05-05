@@ -2,6 +2,12 @@
 Utility Software v4
 Bachelor's Project — Design and Implementation of a System for Long-Term Audio Recording (Lukas Hrobak)
 RPi5 + PCM1807 ADC
+
+Commands for ssh:
+ssh pi@pitester.local               # Connect to Rpi
+tail -f /home/pi/recorder.log       # Real time recording analysis
+sudo umount /media/pi/RECDATA       # Unmount usb
+
 """
 
 import shutil

@@ -1,0 +1,8 @@
+# Crontab config for Utility Software v4
+# Bachelor's Project — Design and Implementation of a System for Long-Term Audio Recording (Lukas Hrobak)
+
+# To install: sudo crontab -e  and paste these lines
+
+@reboot sleep 10 && python3 /home/pi/setup_audio.py >> /home/pi/audio_setup.log 2>&1
+@reboot sleep 15 && python3 /home/pi/utility_software_v4.py >> /home/pi/recorder.log 2>&1
+@reboot sleep 25 && chmod -R 755 /media/pi/RECDATA 2>/dev/null || true

@@ -3,12 +3,14 @@ Cli app v4
 Bachelor's Project — Design and Implementation of a System for Long-Term Audio Recording (Lukas Hrobak)
 
 Commands:
-  python cli.py -i rec.wav -a                          # Analyze single file to stdout
-  python cli.py -i recordings/ -s                      # Analyze folder, write summary txt
-  python cli.py -i rec.wav -p waveform                 # Save waveform PNG
-  python cli.py -i rec.wav -p spectrogram -f 500 4000  # Save spectrogram (filtered)
-  python cli.py -i recordings/ -p rms                  # Save RMS timeline (needs rms_log.csv)
-  python cli.py -i recordings/ --all -o results/       # Full analysis + all plots
+  py cli.py -i rec.wav -a                          # Analyze single file to stdout
+  py cli.py -i recordings/ -s                      # Analyze folder, write summary txt
+  py cli.py -i rec.wav -p waveform                 # Save waveform PNG
+  py cli.py -i rec.wav -p spectrogram -f 500 4000  # Save spectrogram (filtered)
+  py cli.py -i recordings/ -p rms                  # Save RMS timeline (needs rms_log.csv)
+  py cli.py -i recordings/ --all -o results/       # Full analysis + all plots
+
+  # For Linux/MacOS use "python3" instead of "py"
 """
 
 import argparse
@@ -55,7 +57,9 @@ def plot_waveform(wav_path: Path, out_dir: Path, low_hz: float = 20, high_hz: fl
     trig_amp = 10 ** (TRIGGER_DB / 20.0)
     ax.axhline( trig_amp, color="red", linestyle="--", linewidth=0.8, label=f"Trigger ({TRIGGER_DB} dBFS)")
     ax.axhline(-trig_amp, color="red", linestyle="--", linewidth=0.8)
-    ax.set_ylim(-1.05, 1.05)
+    peak = float(np.max(np.abs(samples)))
+    y_lim = max(peak * 2, trig_amp * 1.5)
+    ax.set_ylim(-y_lim, y_lim)
     ax.set_title(wav_path.name)
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Amplitude")
@@ -146,8 +150,8 @@ def plot_rms(folder: Path, out_dir: Path) -> Path:
     for ax in [ax1, ax2]:
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
 
-    fig.autofmt_xdate(rotation=30)
-    fig.tight_layout()
+    for ax in [ax1, ax2]:
+        plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
     out_path = out_dir / "rms_timeline.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)

@@ -1,0 +1,36 @@
+import os
+import time
+
+def setup_hardware():
+    print("--- PCM1807 Audio Setup for RPi5 ---")
+
+    # Pin 7 (GPIO4) = Master Clock output (GPCLK0)
+    os.system("pinctrl set 4 a0")
+
+    # Pin 40 (GPIO21) = input, passive bridge to Pin 38
+    os.system("pinctrl set 21 ip pn")
+
+    # Pin 38 (GPIO20) = I2S data input (SDI)
+    os.system("pinctrl set 20 a2")
+
+    # Pin 12 (GPIO18) = I2S BCK (Bit Clock)
+    os.system("pinctrl set 18 a2")
+
+    # Pin 35 (GPIO19) = I2S LRCK (Word Clock)
+    os.system("pinctrl set 19 a2")
+
+    # GPIO 0, 1, 5 = ADC config pins MC, MS, MD → LOW
+    for pin in [0, 1, 5]:
+        os.system(f"pinctrl set {pin} op dl")
+
+    time.sleep(1)
+
+    print("\n--- Verification ---")
+    os.system("pinctrl get 4,20,21")
+    print("Clock rate:")
+    os.system("cat /sys/kernel/debug/clk/clk_gp0/clk_rate")
+    print("Clock enable count:")
+    os.system("cat /sys/kernel/debug/clk/clk_gp0/clk_enable_count")
+
+if __name__ == "__main__":
+    setup_hardware()
