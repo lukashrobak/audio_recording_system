@@ -5,7 +5,7 @@ Bachelor's Project — Design and Implementation of a System for Long-Term Audio
 Commands:
   py cli.py -i rec.wav -a                          # Analyze single file to stdout
   py cli.py -i recordings/ -s                      # Analyze folder, write summary txt
-  py cli.py -i rec.wav -p waveform                 # Save waveform PNG
+  py cli.py -i rec.wav -p waveform                 # Save waveform PDF
   py cli.py -i rec.wav -p spectrogram -f 500 4000  # Save spectrogram (filtered)
   py cli.py -i recordings/ -p rms                  # Save RMS timeline (needs rms_log.csv)
   py cli.py -i recordings/ --all -o results/       # Full analysis + all plots
@@ -31,9 +31,68 @@ from audio_processing import (
     BAND_LABELS,
 )
 
+# Increase font size so plots match document text size
+plt.rcParams.update({"font.size": 10, "axes.titlesize": 11, "axes.labelsize": 10})
+
+
+def _main_segment(timestamps, *arrays, min_gap_s: float = 60.0, min_segment_s: float = 60.0):
+    """
+    Return the last sufficiently long continuous segment of measurements.
+
+    Any gap longer than ``min_gap_s`` seconds splits the data into separate
+    segments. Segments shorter than ``min_segment_s`` seconds are considered
+    stray (e.g. shutdown readings or leftover points from a previous session)
+    and are ignored. Among the remaining segments the LAST one is returned,
+    so that if an old session is still on the USB the current (most recent)
+    session is always preferred.
+    """
+    n = len(timestamps)
+    if n < 2:
+        return (timestamps, *arrays)
+
+    gaps = [(timestamps[i + 1] - timestamps[i]).total_seconds()
+            for i in range(n - 1)]
+
+    # Build segments as (start_idx, end_idx) pairs
+    seg_starts = [0] + [i + 1 for i, g in enumerate(gaps) if g > min_gap_s]
+    seg_ends   = [i + 1 for i, g in enumerate(gaps) if g > min_gap_s] + [n]
+
+    # Keep only segments long enough to be a real session
+    valid = [
+        (s, e) for s, e in zip(seg_starts, seg_ends)
+        if (timestamps[e - 1] - timestamps[s]).total_seconds() >= min_segment_s
+    ]
+
+    if not valid:
+        # Nothing qualifies — fall back to the longest segment
+        s, e = max(zip(seg_starts, seg_ends), key=lambda se: se[1] - se[0])
+    else:
+        # Pick the last valid segment (most recent session)
+        s, e = valid[-1]
+
+    return (timestamps[s:e], *(arr[s:e] for arr in arrays))
+
+
+def _collect_segments(timestamps, *arrays, min_gap_s: float = 60.0, min_segment_s: float = 60.0):
+    """Return all valid continuous segments as a list of tuples (ts, *arrays)."""
+    n = len(timestamps)
+    if n < 2:
+        return [(timestamps, *arrays)]
+
+    gaps = [(timestamps[i + 1] - timestamps[i]).total_seconds() for i in range(n - 1)]
+    seg_starts = [0] + [i + 1 for i, g in enumerate(gaps) if g > min_gap_s]
+    seg_ends   = [i + 1 for i, g in enumerate(gaps) if g > min_gap_s] + [n]
+
+    segments = []
+    for s, e in zip(seg_starts, seg_ends):
+        if (timestamps[e - 1] - timestamps[s]).total_seconds() >= min_segment_s:
+            segments.append((timestamps[s:e], *(arr[s:e] for arr in arrays)))
+
+    return segments if segments else [(timestamps, *arrays)]
+
 
 def plot_waveform(wav_path: Path, out_dir: Path, low_hz: float = 20, high_hz: float = 20000, analysis: dict = None) -> Path:
-    """Saves a waveform + RMS envelope plot."""
+    """Saves a waveform + RMS envelope plot as PDF."""
     samples, sr = load_wav(wav_path)
     if low_hz > 20 or high_hz < 20000:
         samples = apply_bandpass(samples, sr, low_hz, high_hz)
@@ -66,19 +125,38 @@ def plot_waveform(wav_path: Path, out_dir: Path, low_hz: float = 20, high_hz: fl
     ax.legend(fontsize=8)
 
     fig.tight_layout()
-    out_path = out_dir / f"{wav_path.stem}_waveform.png"
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    out_path = out_dir / f"{wav_path.stem}_waveform.pdf"
+    fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     return out_path
 
 
 def plot_spectrogram(wav_path: Path, out_dir: Path, low_hz: float = 20, high_hz: float = 20000) -> Path:
-    """Saves a spectrogram plot."""
+    """Saves a spectrogram plot as PNG."""
     samples, sr = load_wav(wav_path)
+
+    # Ensure 1D — take first channel if multi-channel
+    if samples.ndim > 1:
+        samples = samples[:, 0]
+
     if low_hz > 20 or high_hz < 20000:
         samples = apply_bandpass(samples, sr, low_hz, high_hz)
 
-    f, t, Sxx_db = compute_spectrogram(samples, sr)
+    # Try to compute spectrogram; if out of memory, downsample and retry
+    f, t, Sxx_db = None, None, None
+    for factor in [1, 2, 4, 8]:
+        try:
+            s = samples[::factor]
+            sr_ds = sr // factor
+            f, t, Sxx_db = compute_spectrogram(s, sr_ds)
+            if factor > 1:
+                print(f"    (downsampled {factor}x due to memory constraints)")
+            break
+        except MemoryError:
+            continue
+    if f is None:
+        raise MemoryError("Spectrogram failed even after 8x downsampling.")
+
     duration = len(samples) / sr
 
     fig, ax = plt.subplots(figsize=(14, 5))
@@ -107,7 +185,12 @@ def plot_spectrogram(wav_path: Path, out_dir: Path, low_hz: float = 20, high_hz:
 
 
 def plot_rms(folder: Path, out_dir: Path) -> Path:
-    """Saves an RMS timeline plot from rms_log.csv."""
+    """Saves an RMS timeline plot from rms_log.csv as PDF.
+
+    All valid recording segments are shown concatenated on a common time axis.
+    Gaps between sessions are replaced by a narrow visual break marker so the
+    plot stays compact while still communicating that time was skipped.
+    """
     csv_path = folder / "rms_log.csv"
     if not csv_path.exists():
         print(f"  [!] rms_log.csv not found in {folder}")
@@ -118,42 +201,93 @@ def plot_rms(folder: Path, out_dir: Path) -> Path:
         print("  [!] rms_log.csv is empty.")
         return None
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 6), gridspec_kw={"height_ratios": [3, 1], "hspace": 0.4})
+    # Collect all valid segments
+    segments = _collect_segments(timestamps, rms_vals, triggered, recording)
 
-    ax1.plot(timestamps, rms_vals, linewidth=0.5, label="RMS")
+    # Build a unified x-axis (cumulative seconds) with a small visual gap
+    VISUAL_GAP = 30   # seconds of blank space between segments on the plot
+    TICK_INTERVAL = 15 * 60  # one x-tick every 15 minutes within a segment
+    x_all, rms_all, trig_all, rec_all = [], [], [], []
+    tick_positions, tick_labels, break_positions = [], [], []
+    offset = 0.0
 
-    for i, rec in enumerate(recording):
-        if rec and i + 1 < len(timestamps):
-            ax1.axvspan(timestamps[i], timestamps[i+1], alpha=0.15, color="orange", linewidth=0)
+    for idx, (ts, rms, trig, rec) in enumerate(segments):
+        dur = (ts[-1] - ts[0]).total_seconds()
+        x = [(t - ts[0]).total_seconds() + offset for t in ts]
 
-    ax1.axhline(TRIGGER_DB, color="red",   linestyle="--", linewidth=1, label=f"Trigger ({TRIGGER_DB} dBFS)")
-    ax1.axhline(NOISE_DB,   color="green", linestyle="--", linewidth=1, label=f"Noise floor ({NOISE_DB} dBFS)")
+        # Ticks: one at start, then every TICK_INTERVAL seconds
+        t_cursor = 0.0
+        while t_cursor <= dur:
+            tick_positions.append(t_cursor + offset)
+            from datetime import timedelta as _td
+            actual_time = ts[0] + _td(seconds=t_cursor)
+            tick_labels.append(actual_time.strftime("%H:%M"))
+            t_cursor += TICK_INTERVAL
 
-    event_times = [timestamps[i] for i in range(1, len(triggered)) if triggered[i] == 1 and triggered[i-1] == 0]
-    for et in event_times:
-        ax1.axvline(et, color="red", linewidth=0.6, alpha=0.5, zorder=3)
-    if event_times:
-        ax1.axvline(event_times[0], color="red", linewidth=0.6, alpha=0.5,
-                    label=f"Trigger events ({len(event_times)})", zorder=3)
+        x_all.extend(x)
+        rms_all.extend(rms)
+        trig_all.extend(trig)
+        rec_all.extend(rec)
+        offset += dur + VISUAL_GAP
+        if idx < len(segments) - 1:
+            break_positions.append(offset - VISUAL_GAP / 2)
+
+    x_all = np.array(x_all)
+    rms_all = list(rms_all)
+    rec_all = list(rec_all)
+    trig_all = list(trig_all)
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 6),
+                                    gridspec_kw={"height_ratios": [3, 1], "hspace": 0.4})
+
+    ax1.plot(x_all, rms_all, linewidth=0.5, label="RMS")
+
+    # Orange spans for recording activity
+    for i, rec in enumerate(rec_all):
+        if rec and i + 1 < len(x_all):
+            ax1.axvspan(x_all[i], x_all[i + 1], alpha=0.15, color="orange", linewidth=0)
+
+    ax1.axhline(TRIGGER_DB, color="red",   linestyle="--", linewidth=1,
+                label=f"Trigger ({TRIGGER_DB} dBFS)")
+    ax1.axhline(NOISE_DB,   color="green", linestyle="--", linewidth=1,
+                label=f"Noise floor ({NOISE_DB} dBFS)")
+
+    # Trigger event markers
+    event_xs = [x_all[i] for i in range(1, len(trig_all))
+                if trig_all[i] == 1 and trig_all[i - 1] == 0]
+    for ex in event_xs:
+        ax1.axvline(ex, color="red", linewidth=0.6, alpha=0.5, zorder=3)
+    if event_xs:
+        ax1.axvline(event_xs[0], color="red", linewidth=0.6, alpha=0.5,
+                    label=f"Trigger events ({len(event_xs)})", zorder=3)
+
+    # Break markers between segments
+    for bp in break_positions:
+        for ax in [ax1, ax2]:
+            ax.axvspan(bp - VISUAL_GAP / 2, bp + VISUAL_GAP / 2,
+                       color="#e0e0e0", alpha=0.9, zorder=2)
+        # Label only on top panel
+        ax1.text(bp, -45, "// break //", ha="center", va="center",
+                 fontsize=7, color="#888888", zorder=4, rotation=90,
+                 bbox=dict(facecolor="none", edgecolor="none", pad=1))
 
     ax1.set_ylim(-90, 0)
     ax1.set_ylabel("dBFS")
     ax1.set_title("RMS Level Over Time")
+    ax1.set_xticks(tick_positions)
+    ax1.set_xticklabels(tick_labels, rotation=30, ha="right")
     ax1.legend(fontsize=8)
 
-    ax2.fill_between(timestamps, np.array(recording, dtype=float), 0, alpha=0.7, step="post")
+    ax2.fill_between(x_all, np.array(rec_all, dtype=float), 0, alpha=0.7, step="post")
     ax2.set_ylim(0, 1.5)
     ax2.set_yticks([])
     ax2.set_title("Recording Activity")
     ax2.set_xlabel("Time")
+    ax2.set_xticks(tick_positions)
+    ax2.set_xticklabels(tick_labels, rotation=30, ha="right")
 
-    for ax in [ax1, ax2]:
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
-
-    for ax in [ax1, ax2]:
-        plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
-    out_path = out_dir / "rms_timeline.png"
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    out_path = out_dir / "rms_timeline.pdf"
+    fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     return out_path
 

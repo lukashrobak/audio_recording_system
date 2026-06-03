@@ -1,0 +1,32 @@
+Session Summary:
+Generated      : 2026-05-29 18:05:49
+Source folder  : D:\recordings
+
+── RECORDINGS ───────────────────────────────────────
+Total files    : 8
+Total size     : 24.4 MB
+Total duration : 0.04 h  (133 s)
+
+── SESSION ──────────────────────────────────────────
+Session start  : 2026-05-29 16:39:16
+Session end    : 2026-05-29 18:00:18
+Trigger events : 20
+
+── QUALITY ANALYSIS ─────────────────────────────────
+Files analysed : 8 / 8
+Mean SNR       : 22.8 dB
+Min  SNR       : 11.4 dB
+Max  SNR       : 63.0 dB
+Clipped files  : 0
+
+── PER-FILE DETAILS ─────────────────────────────────
+  rec_20260529_164032.wav                       19.9s  SNR: 63.0dB  DC:  -94dB  Clip:0.000%
+  rec_20260529_164139.wav                       36.1s  SNR: 32.3dB  DC: -103dB  Clip:0.000%
+  rec_20260529_164340.wav                       41.3s  SNR: 12.0dB  DC: -127dB  Clip:0.000%
+  rec_20260529_165409.wav                       10.2s  SNR: 17.4dB  DC: -134dB  Clip:0.000%
+  rec_20260529_171104.wav                        5.5s  SNR: 11.4dB  DC: -114dB  Clip:0.000%
+  rec_20260529_171359.wav                        9.5s  SNR: 13.4dB  DC: -120dB  Clip:0.000%
+  rec_20260529_171406.wav                        5.0s  SNR: 15.6dB  DC: -120dB  Clip:0.000%
+  rec_20260529_172016.wav                        5.5s  SNR: 17.4dB  DC: -128dB  Clip:0.000%
+
+========================================================

@@ -27,12 +27,24 @@ CHANNELS        = 1
 FORMAT          = "S32_LE"
 BIT_DEPTH       = 32
 
+# Dynamic threshold configuration
+DYNAMIC_THRESHOLD       = True    # Enable adaptive noise floor estimation
+NOISE_EST_WINDOW_SEC    = 60.0    # Rolling window for noise estimation (seconds)
+TRIGGER_MARGIN_DB       = 12.0    # dB above estimated noise floor to trigger
+NOISE_MARGIN_DB         = 5.0     # dB above estimated noise floor to stop recording
+ABSOLUTE_MIN_TRIGGER_DB = -55.0   # Never trigger below this level (true silence guard)
+
+# Static fallback thresholds (used when DYNAMIC_THRESHOLD = False,
+# or during the initial warm-up period before the noise estimate stabilises)
 TRIGGER_DB      = -35.0           # dBFS — recording starts above this
 NOISE_FLOOR_DB  = -42.0           # dBFS — recording stops below this
 
 PRE_RECORD_SEC  = 1.0             # Seconds to keep before trigger
 POST_RECORD_SEC = 3.0             # Seconds to keep after silence
-MAX_RECORD_SEC  = 60.0            # Maximum single recording length
+MAX_RECORD_SEC  = 600.0           # Maximum single recording length
+                                  # Note: the entire recording is buffered in RAM before saving.
+                                  # At 48kHz/32-bit mono, 600 s ≈ 115 MB — safe for RPi 5 (4 GB).
+                                  # For longer limits, consider a streaming WAV writer instead.
 
 USB_LABEL       = "RECDATA"
 USB_MOUNT_BASE  = "/media/pi"
@@ -48,7 +60,9 @@ CHUNK_SEC       = 0.1
 CHUNK_SAMPLES   = int(SAMPLE_RATE * CHUNK_SEC)
 BYTES_PER_CHUNK = CHUNK_SAMPLES * CHANNELS * (BIT_DEPTH // 8)
 
-PRE_BUFFER_CHUNKS = int(PRE_RECORD_SEC / CHUNK_SEC)
+PRE_BUFFER_CHUNKS  = int(PRE_RECORD_SEC / CHUNK_SEC)
+NOISE_EST_CHUNKS   = int(NOISE_EST_WINDOW_SEC / CHUNK_SEC)  # chunks in estimation window
+NOISE_EST_PERCENTILE = 30   # use 30th percentile of recent RMS values as noise estimate
 
 CSV_BATCH_SIZE  = 100             # Flush to disk every N chunks
 
@@ -95,6 +109,17 @@ def setup_dirs():
         with open(LOG_FILE, "w") as f:
             f.write("timestamp,rms_db,triggered,recording\n")
     print(f"Save directory ready: {SAVE_DIR}")
+
+
+def estimate_noise_floor(noise_buffer):
+    """
+    Estimates the ambient noise floor from a rolling buffer of recent RMS dB values.
+    Uses the NOISE_EST_PERCENTILE-th percentile to represent background noise
+    while ignoring transient acoustic events in the window.
+    """
+    if len(noise_buffer) < NOISE_EST_CHUNKS // 2:
+        return None   # not enough data yet — fall back to static thresholds
+    return float(np.percentile(list(noise_buffer), NOISE_EST_PERCENTILE))
 
 
 def rms_to_db(rms):
@@ -197,8 +222,15 @@ def monitor():
 
     print("Utility Software v4")
     print("System for Long-Term Audio Recording (Lukas Hrobak)")
-    print(f"Trigger threshold : {TRIGGER_DB} dBFS")
-    print(f"Noise floor       : {NOISE_FLOOR_DB} dBFS")
+    print(f"Threshold mode    : {'dynamic' if DYNAMIC_THRESHOLD else 'static'}")
+    if DYNAMIC_THRESHOLD:
+        print(f"  Trigger margin  : +{TRIGGER_MARGIN_DB} dB above noise estimate")
+        print(f"  Noise margin    : +{NOISE_MARGIN_DB} dB above noise estimate")
+        print(f"  Estimation win  : {NOISE_EST_WINDOW_SEC:.0f}s ({NOISE_EST_PERCENTILE}th percentile)")
+        print(f"  Absolute min    : {ABSOLUTE_MIN_TRIGGER_DB} dBFS")
+    else:
+        print(f"  Trigger         : {TRIGGER_DB} dBFS")
+        print(f"  Noise floor     : {NOISE_FLOOR_DB} dBFS")
     print(f"Max clip length   : {MAX_RECORD_SEC}s")
     print(f"Min free space    : {MIN_FREE_GB} GB")
     print(f"USB label         : {USB_LABEL}")
@@ -209,7 +241,8 @@ def monitor():
     wait_for_usb()
     setup_dirs()
 
-    pre_buffer = deque(maxlen=PRE_BUFFER_CHUNKS)
+    pre_buffer   = deque(maxlen=PRE_BUFFER_CHUNKS)
+    noise_buffer = deque(maxlen=NOISE_EST_CHUNKS)   # rolling RMS history for noise estimation
 
     recording      = False
     record_buffer  = []
@@ -257,8 +290,29 @@ def monitor():
             now    = datetime.now()
             ts     = now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
-            above_trigger = rms_db > TRIGGER_DB
-            above_noise   = rms_db > NOISE_FLOOR_DB
+            # Update noise estimation buffer (only during silence to avoid
+            # polluting the estimate with loud acoustic events)
+            if not recording:
+                noise_buffer.append(rms_db)
+
+            # Compute effective thresholds
+            if DYNAMIC_THRESHOLD:
+                noise_est = estimate_noise_floor(noise_buffer)
+                if noise_est is not None:
+                    eff_trigger     = max(noise_est + TRIGGER_MARGIN_DB, ABSOLUTE_MIN_TRIGGER_DB)
+                    eff_noise_floor = noise_est + NOISE_MARGIN_DB
+                else:
+                    # Warm-up: fall back to static thresholds
+                    eff_trigger     = TRIGGER_DB
+                    eff_noise_floor = NOISE_FLOOR_DB
+                    noise_est       = float("nan")
+            else:
+                eff_trigger     = TRIGGER_DB
+                eff_noise_floor = NOISE_FLOOR_DB
+                noise_est       = float("nan")
+
+            above_trigger = rms_db > eff_trigger
+            above_noise   = rms_db > eff_noise_floor
 
             # Batch CSV accumulation
             csv_batch.append(f"{ts},{rms_db:.2f},{int(above_trigger)},{int(recording)}\n")
@@ -266,11 +320,12 @@ def monitor():
                 flush_csv_batch(csv_batch)
                 csv_batch = []
 
-            # Live level meter
+            # Live level meter (show effective trigger threshold)
             bar_len = int(max(0, min(40, (rms_db + 80) / 2)))
             bar     = "#" * bar_len + "-" * (40 - bar_len)
             status  = "REC" if recording else "   "
-            print(f"\r[{status}] {rms_db:6.1f} dBFS [{bar}]", end="", flush=True)
+            thr_str = f"{eff_trigger:.1f}" if not np.isnan(noise_est) else f"{eff_trigger:.1f}*"
+            print(f"\r[{status}] {rms_db:6.1f} dBFS [{bar}] thr:{thr_str}", end="", flush=True)
 
             # Pre-trigger rolling buffer
             if not recording:
@@ -278,7 +333,7 @@ def monitor():
 
             # Trigger detection
             if above_trigger and not recording:
-                print(f"\nTRIGGER {now.strftime('%H:%M:%S')} — {rms_db:.1f} dBFS")
+                print(f"\nTRIGGER {now.strftime('%H:%M:%S')} — {rms_db:.1f} dBFS  (thr: {eff_trigger:.1f} dBFS)")
                 recording      = True
                 record_buffer  = list(pre_buffer)
                 record_chunks  = len(pre_buffer)
